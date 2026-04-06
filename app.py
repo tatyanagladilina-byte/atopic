@@ -2,7 +2,7 @@
 """
 Atopic Brand Carousel Slide Generator
 Brand: A.T.O.P.I.C — atopic skin care
-Canvas: 1080 × 1350 px (4:5 Instagram ratio)
+Canvas: 1080 × 1440 px (3:4 portrait ratio)
 Palette: #EFE7DA background, #3D2B1F text, #8C7B6B subtitle, #B5A898 accent
 """
 
@@ -11,7 +11,7 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ─── CONSTANTS ───────────────────────────────────────────────────────────────────
-W, H       = 1080, 1350          # 4:5 Instagram portrait
+W, H       = 1080, 1440          # 3:4 portrait
 CANVAS     = (W, H)
 PAD        = 96                  # padding matches CSS spec
 BG         = (239, 231, 218)     # #EFE7DA
@@ -113,7 +113,7 @@ def fetch_img(url):
         print(f"fetch_img error: {e}")
         return None
 
-def crop_to_ratio(img, ratio_w=4, ratio_h=5):
+def crop_to_ratio(img, ratio_w=3, ratio_h=4):
     """Crop PIL image to target aspect ratio, centered."""
     iw, ih = img.size
     target_ratio = ratio_w / ratio_h
@@ -481,7 +481,7 @@ def create_app():
         app = Flask(__name__)
 
         @app.route("/health")
-        def health(): return jsonify({"status":"ok","canvas":"1080x1350"})
+        def health(): return jsonify({"status":"ok","canvas":"1080x1440"})
 
         @app.route("/slides/<sid>/<int:n>.png")
         def serve(sid, n):
