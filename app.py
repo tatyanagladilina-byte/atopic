@@ -1,54 +1,107 @@
 #!/usr/bin/env python3
 """
-Atopic Brand Carousel Slide Generator
+Atopic Brand Carousel Slide Generator  v3
 Brand: A.T.O.P.I.C — atopic skin care
-Canvas: 1080 × 1440 px (3:4 portrait ratio)
-Palette: #EFE7DA background, #3D2B1F text, #8C7B6B subtitle, #B5A898 accent
+Canvas: 1080 × 1440 px (3:4)
+Specs: pixel-perfect from Figma/CSS export
 """
 
-import os, sys, json, base64, uuid, time, requests
+import os, sys, base64, uuid, time, requests
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# ─── CONSTANTS ───────────────────────────────────────────────────────────────────
-W, H       = 1080, 1440          # 3:4 portrait
-CANVAS     = (W, H)
-PAD        = 96                  # padding matches CSS spec
-BG         = (239, 231, 218)     # #EFE7DA
-TEXT       = (61,  43,  31)      # #3D2B1F
-SUB        = (140, 123, 107)     # #8C7B6B
-ACCENT     = (181, 168, 152)     # #B5A898
-WHITE      = (255, 255, 255)
-BRAND      = "A.T.O.P.I.C"
+# ─── CANVAS & PALETTE ────────────────────────────────────────────────────────
+W, H   = 1080, 1440
+PAD    = 96           # 96px all sides
 
-# ─── FONTS ───────────────────────────────────────────────────────────────────────
-FONTS = {
-    "regular": [
-        "/app/fonts/Cormorant-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-    ],
-    "italic": [
-        "/app/fonts/Cormorant-Italic.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
-    ],
+# Colours (from Figma)
+BG          = (241, 232, 227)   # #F1E8E3
+TEXT_DARK   = (61,  43,  31)    # #3D2B1F  – body text on light bg
+TEXT_SUB    = (140, 123, 107)   # #8C7B6B  – subtitle
+ACCENT_LINE = (181, 168, 152)   # #B5A898  – thin rule / brand
+WHITE       = (255, 255, 255)
+OVERLAY_COL = (80,  63,  53)    # rgba(80,63,53,0.8) — cover gradient end
+
+BRAND = "A.T.O.P.I.C"
+
+# ─── FONT SETUP ──────────────────────────────────────────────────────────────
+FONT_DIR = "/app/fonts"
+_FONT_URLS = {
+    "CactusClassicalSerif-Regular.ttf":
+        "https://github.com/google/fonts/raw/main/ofl/cactusclassicalserif/CactusClassicalSerif-Regular.ttf",
+    "NotoSans-Regular.ttf":
+        "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf",
 }
 
-def font(style="regular", size=48):
-    for p in FONTS.get(style, FONTS["regular"]):
+def _download_fonts():
+    os.makedirs(FONT_DIR, exist_ok=True)
+    for name, url in _FONT_URLS.items():
+        path = f"{FONT_DIR}/{name}"
+        if not os.path.exists(path):
+            try:
+                r = requests.get(url, timeout=30)
+                if r.status_code == 200:
+                    with open(path, "wb") as f: f.write(r.content)
+                    print(f"✅ font: {name}")
+            except Exception as e:
+                print(f"⚠️  font download {name}: {e}")
+
+_download_fonts()
+
+_FONT_SEARCH = {
+    "cactus":  [f"{FONT_DIR}/CactusClassicalSerif-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"],
+    "sans":    [f"{FONT_DIR}/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
+}
+
+def fnt(family: str, size: int) -> ImageFont.FreeTypeFont:
+    for p in _FONT_SEARCH.get(family, _FONT_SEARCH["sans"]):
         if os.path.exists(p):
             try: return ImageFont.truetype(p, size)
-            except: continue
+            except: pass
     return ImageFont.load_default()
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────────
-def wrap(text, fnt, max_w, draw):
+# ─── LOW-LEVEL DRAWING HELPERS ───────────────────────────────────────────────
+
+def _text_w(draw, text: str, f) -> int:
+    bb = draw.textbbox((0, 0), text, font=f)
+    return bb[2] - bb[0]
+
+def _text_h(draw, text: str, f) -> int:
+    bb = draw.textbbox((0, 0), text, font=f)
+    return bb[3] - bb[1]
+
+def draw_tracked(draw, text: str, cx: float, y: float,
+                 f, color, tracking_px: float = 0,
+                 align: str = "center", canvas_w: int = W):
+    """
+    Draw text with CSS letter-spacing (tracking).
+    align: 'center' | 'left' | 'right'
+    """
+    chars = list(text)
+    char_widths = [_text_w(draw, c, f) for c in chars]
+    total_w = sum(char_widths) + tracking_px * max(len(chars) - 1, 0)
+
+    if align == "center":
+        x = (canvas_w - total_w) / 2
+    elif align == "right":
+        x = canvas_w - PAD - total_w
+    else:
+        x = cx
+
+    for c, cw in zip(chars, char_widths):
+        draw.text((x, y), c, font=f, fill=color)
+        x += cw + tracking_px
+
+def wrap_to_lines(draw, text: str, f, max_w: int) -> list[str]:
     words = text.split()
     lines, cur = [], []
     for w in words:
         test = " ".join(cur + [w])
-        bb = draw.textbbox((0,0), test, font=fnt)
-        if bb[2]-bb[0] <= max_w:
+        if _text_w(draw, test, f) <= max_w:
             cur.append(w)
         else:
             if cur: lines.append(" ".join(cur))
@@ -56,55 +109,54 @@ def wrap(text, fnt, max_w, draw):
     if cur: lines.append(" ".join(cur))
     return lines
 
-def text_h(draw, lines, fnt, gap=8):
-    total = 0
-    for l in lines:
-        bb = draw.textbbox((0,0), l, font=fnt)
-        total += (bb[3]-bb[1]) + gap
-    return total
-
-def draw_lines(draw, lines, y, fnt, color, gap=8):
-    for l in lines:
-        bb = draw.textbbox((0,0), l, font=fnt)
-        x = (W - (bb[2]-bb[0])) // 2
-        draw.text((x, y), l, font=fnt, fill=color)
-        y += (bb[3]-bb[1]) + gap
+def draw_multiline_tracked(draw, lines: list[str], y: float,
+                            f, color, line_h: float,
+                            tracking_px: float = 0,
+                            align: str = "center") -> float:
+    """Draw wrapped lines, return y after last line."""
+    for line in lines:
+        draw_tracked(draw, line, PAD, y, f, color, tracking_px, align)
+        y += line_h
     return y
 
-def draw_spaced(draw, text, y, fnt, color, letter_gap=3):
-    spaced = (" "*letter_gap).join(text.upper())
-    bb = draw.textbbox((0,0), spaced, font=fnt)
-    x = (W - (bb[2]-bb[0])) // 2
-    draw.text((x, y), spaced, font=fnt, fill=color)
-    return bb[3]-bb[1]
+def choose_font_size(draw, text: str, sizes, max_w: int, family="cactus"):
+    """Pick largest size where text fits in ≤3 lines."""
+    for s in sizes:
+        f = fnt(family, s)
+        lines = wrap_to_lines(draw, text, f, max_w)
+        if len(lines) <= 3:
+            return f, lines, s
+    f = fnt(family, sizes[-1])
+    return f, wrap_to_lines(draw, text, f, max_w), sizes[-1]
 
-def accent_line(draw, y, width=100):
-    x1 = (W-width)//2; x2 = (W+width)//2
-    draw.line([(x1,y),(x2,y)], fill=ACCENT, width=1)
+# ─── BACKGROUND & GRADIENT ───────────────────────────────────────────────────
 
-def brand_logo(draw, y=None, x_align="center", color=None):
-    """Draw spaced brand name. y=None → bottom-center at H-60."""
-    color = color or ACCENT
-    fnt = font("regular", 18)
-    spaced = "  ".join(BRAND)
-    bb = draw.textbbox((0,0), spaced, font=fnt)
-    tw = bb[2]-bb[0]
-    if y is None: y = H - PAD//2 - (bb[3]-bb[1])
-    if x_align == "center": x = (W-tw)//2
-    elif x_align == "right": x = W - tw - PAD
-    else: x = PAD
-    draw.text((x,y), spaced, font=fnt, fill=color)
+def make_bg() -> Image.Image:
+    return Image.new("RGB", (W, H), BG)
 
-def gradient_bg():
-    img = Image.new("RGB", CANVAS, BG)
-    draw = ImageDraw.Draw(img)
+def add_cover_overlay(img: Image.Image) -> Image.Image:
+    """
+    CSS: gradient-to-b from rgba(255,244,222,0) → rgba(80,63,53,0.8) at 86.7%
+    Above 86.7% (1248px): linear ramp 0→204 alpha
+    Below 86.7%: stays at alpha 204
+    """
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    stop_y = int(H * 0.867)   # 1248 px
+    r, g, b = OVERLAY_COL
+
     for y in range(H):
-        f = y/H
-        r = int(239 - f*18); g = int(231 - f*20); b = int(218 - f*22)
-        draw.line([(0,y),(W,y)], fill=(r,g,b))
-    return img
+        if y <= stop_y:
+            a = int(204 * y / stop_y)
+        else:
+            a = 204
+        draw.line([(0, y), (W, y)], fill=(r, g, b, a))
 
-def fetch_img(url):
+    img = img.convert("RGBA")
+    img = Image.alpha_composite(img, overlay)
+    return img.convert("RGB")
+
+def fetch_img(url: str) -> Image.Image | None:
     try:
         r = requests.get(url, timeout=25)
         r.raise_for_status()
@@ -113,466 +165,469 @@ def fetch_img(url):
         print(f"fetch_img error: {e}")
         return None
 
-def crop_to_ratio(img, ratio_w=3, ratio_h=4):
-    """Crop PIL image to target aspect ratio, centered."""
-    iw, ih = img.size
-    target_ratio = ratio_w / ratio_h
+def fit_cover_image(photo: Image.Image) -> Image.Image:
+    """
+    CSS: height 112.5%, top -9.38%  → image is 1620px tall, top cropped by 135px
+    Actually we just crop to 3:4 and fill canvas.
+    """
+    iw, ih = photo.size
+    target_ratio = W / H   # 0.75
     current_ratio = iw / ih
-    if current_ratio > target_ratio:          # wider → crop sides
-        new_w = int(ih * target_ratio)
-        img = img.crop(((iw-new_w)//2, 0, (iw+new_w)//2, ih))
-    else:                                      # taller → crop top/bottom
-        new_h = int(iw / target_ratio)
-        img = img.crop((0, (ih-new_h)//2, iw, (ih+new_h)//2))
-    return img.resize(CANVAS, Image.LANCZOS)
+    if current_ratio > target_ratio:
+        nw = int(ih * target_ratio)
+        photo = photo.crop(((iw - nw) // 2, 0, (iw + nw) // 2, ih))
+    else:
+        nh = int(iw / target_ratio)
+        # shift slightly upward (-9.38% of 1440 = -135px)
+        shift = int(nh * 0.094)
+        top = max(0, (ih - nh) // 2 - shift)
+        photo = photo.crop((0, top, iw, top + nh))
+    return photo.resize((W, H), Image.LANCZOS)
 
-def choose_size(title, sizes=(80,68,56,46), max_w=None, draw=None):
-    max_w = max_w or (W - PAD*2)
-    d = draw or ImageDraw.Draw(Image.new("RGB",(1,1)))
-    for s in sizes:
-        f = font("regular", s)
-        lines = wrap(title, f, max_w, d)
-        if len(lines) <= 3:
-            return f, lines
-    f = font("regular", sizes[-1])
-    return f, wrap(title, f, max_w, d)
+# ─── SLIDE TYPE 1: COVER ─────────────────────────────────────────────────────
+# Figma: full-bleed image + gradient overlay + centered text bottom-up
+# Layout (justify-end): brand → 72px gap → title block
+#
+def create_cover(title: str, image_url: str | None = None,
+                  image_data: str | None = None) -> Image.Image:
+    # --- background
+    img = make_bg()
 
-# ─── COVER SLIDES (3 types) ──────────────────────────────────────────────────────
-def create_cover(title, subtitle="", image_url=None, image_data=None):
-    """
-    Full-bleed 4:5 image with dark bottom overlay and white text.
-    Handles image_url (DALL-E) or base64 image_data.
-    """
-    bg = None
-    if image_url:   bg = fetch_img(image_url)
-    if bg is None and image_data:
+    # --- full-bleed photo
+    photo = None
+    if image_url:   photo = fetch_img(image_url)
+    if photo is None and image_data:
         try:
             raw = base64.b64decode(image_data) if isinstance(image_data, str) else image_data
-            bg = Image.open(BytesIO(raw)).convert("RGB")
+            photo = Image.open(BytesIO(raw)).convert("RGB")
         except: pass
 
-    if bg is not None:
-        bg = crop_to_ratio(bg)
-        # Slight blur for elegance
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=0.8))
-        img = bg
+    if photo:
+        img = fit_cover_image(photo)
     else:
-        # Fallback warm gradient
-        img = gradient_bg()
-        # Add subtle texture
+        # subtle warm gradient fallback
         draw_tmp = ImageDraw.Draw(img)
+        for y in range(H):
+            f = y / H
+            r = int(241 - f * 30); g = int(232 - f * 35); b = int(227 - f * 40)
+            draw_tmp.line([(0, y), (W, y)], fill=(r, g, b))
 
-    # Bottom gradient overlay (≈60% of height)
-    overlay = Image.new("RGBA", CANVAS, (0,0,0,0))
-    ov = ImageDraw.Draw(overlay)
-    ov_top = int(H * 0.38)
-    ov_h   = H - ov_top
-    for yo in range(ov_h):
-        alpha = int(210 * (yo/ov_h)**0.65)
-        ov.line([(0, ov_top+yo),(W, ov_top+yo)], fill=(28,16,8,alpha))
-
-    img = img.convert("RGBA")
-    img = Image.alpha_composite(img, overlay).convert("RGB")
+    # --- gradient overlay
+    img = add_cover_overlay(img)
     draw = ImageDraw.Draw(img)
 
-    # Brand top-right
-    brand_logo(draw, y=PAD, x_align="right", color=(210,196,178))
+    # --- typography constants
+    TITLE_SIZE    = 80
+    TITLE_LH      = 100    # line-height px
+    TITLE_TRACK   = 0.8    # letter-spacing px
+    BRAND_SIZE    = 40
+    BRAND_TRACK   = 2.4
+    BRAND_ALPHA   = 153    # 60% of 255
+    GAP           = 72     # gap between title block and brand
+    BOTTOM_MARGIN = PAD    # 96px from bottom
 
-    # --- text block positioned from bottom ---
-    BOTTOM_MARGIN = PAD
-    TEXT_MAX_W    = W - PAD*2
+    title_f = fnt("cactus", TITLE_SIZE)
+    brand_f = fnt("sans",   BRAND_SIZE)
 
-    sub_fnt   = font("regular", 19)
-    spaced_sub = "  ".join(subtitle.upper()) if subtitle else ""
-    sub_h_val = 0
-    if subtitle:
-        bb = draw.textbbox((0,0), spaced_sub, font=sub_fnt)
-        sub_h_val = (bb[3]-bb[1]) + 12 + 28   # text + gap + accent
+    # wrap title
+    title_lines = wrap_to_lines(draw, title.upper(), title_f, W - PAD * 2)
 
-    title_fnt, title_lines = choose_size(title, (76,62,50,42), TEXT_MAX_W, draw)
-    title_h_val = text_h(draw, title_lines, title_fnt, gap=10)
+    title_block_h = len(title_lines) * TITLE_LH
+    brand_h       = _text_h(draw, BRAND, brand_f)
 
-    block_h = sub_h_val + title_h_val + 16
-    text_y  = H - BOTTOM_MARGIN - block_h
-    text_y  = max(text_y, int(H*0.52))   # never above 52% of height
+    # total content height: title + gap + brand
+    total_h = title_block_h + GAP + brand_h
+    content_top = H - BOTTOM_MARGIN - total_h
 
-    if subtitle:
-        bb = draw.textbbox((0,0), spaced_sub, font=sub_fnt)
-        x = (W - (bb[2]-bb[0])) // 2
-        draw.text((x, text_y), spaced_sub, font=sub_fnt, fill=(198,180,158))
-        text_y += (bb[3]-bb[1]) + 12
-        accent_line(draw, text_y, width=70)
-        text_y += 28
-
-    draw_lines(draw, title_lines, text_y, title_fnt, WHITE, gap=10)
-    return img
-
-# ─── TEXT SLIDE 1: Large spaced text, space-between layout ───────────────────────
-def create_text_slide_1(title, subtitle="", slide_number=None):
-    """
-    CSS equivalent:
-      display:flex; flex-direction:column; justify-content:space-between;
-      padding:96px; background:#EFE7DA
-    Top: slide number + subtitle category
-    Center: large spaced/serif title
-    Bottom: brand logo
-    """
-    img = gradient_bg()
-    draw = ImageDraw.Draw(img)
-
-    # ── TOP section ──
-    top_y = PAD
-    if slide_number:
-        n_fnt = font("regular", 16)
-        draw.text((PAD, top_y), f"0{slide_number}", font=n_fnt, fill=ACCENT)
-
-    if subtitle:
-        sub_fnt = font("regular", 18)
-        draw_spaced(draw, subtitle, top_y + 2, sub_fnt, SUB, letter_gap=2)
-
-    # ── BOTTOM: brand ──
-    brand_logo(draw, color=ACCENT)
-
-    # ── CENTER: large title ──
-    TEXT_MAX_W = W - PAD*2
-    # Use large spaced text for short titles, smaller for longer
-    if len(title) <= 40:
-        title_fnt, title_lines = choose_size(title, (88,74,60), TEXT_MAX_W, draw)
-        # Apply letter spacing effect by spacing words more
-        gap = 14
-    else:
-        title_fnt, title_lines = choose_size(title, (68,56,46), TEXT_MAX_W, draw)
-        gap = 10
-
-    title_h_val = text_h(draw, title_lines, title_fnt, gap=gap)
-    title_y = (H - title_h_val) // 2
-
-    # Draw with spaced-caps style
+    # --- draw title (white, uppercase, tracked 0.8px)
+    y = content_top
     for line in title_lines:
-        # Apply letter spacing by spreading characters
-        spaced_line = "  ".join(line.upper())
-        bb = draw.textbbox((0,0), spaced_line, font=title_fnt)
-        # Check if spaced version fits, else use normal
-        if (bb[2]-bb[0]) <= TEXT_MAX_W:
-            x = (W - (bb[2]-bb[0])) // 2
-            draw.text((x, title_y), spaced_line, font=title_fnt, fill=TEXT)
-            title_y += (bb[3]-bb[1]) + gap
-        else:
-            bb2 = draw.textbbox((0,0), line, font=title_fnt)
-            x = (W - (bb2[2]-bb2[0])) // 2
-            draw.text((x, title_y), line, font=title_fnt, fill=TEXT)
-            title_y += (bb2[3]-bb2[1]) + gap
+        draw_tracked(draw, line, PAD, y, title_f, WHITE, TITLE_TRACK, "center")
+        y += TITLE_LH
+
+    # --- draw brand (white 60%, tracked 2.4px)
+    y += GAP
+    brand_color = (255, 255, 255, BRAND_ALPHA)
+
+    # Pillow doesn't apply alpha to text directly on RGB — use RGBA composite
+    brand_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(brand_layer)
+    draw_tracked(bd, BRAND, PAD, y, brand_f, (255, 255, 255, BRAND_ALPHA),
+                 BRAND_TRACK, "center")
+    img = img.convert("RGBA")
+    img = Image.alpha_composite(img, brand_layer)
+    img = img.convert("RGB")
 
     return img
 
-# ─── TEXT SLIDE 2: Text + images strip ───────────────────────────────────────────
-def create_text_slide_2(title, body="", subtitle="", photo_urls=None, slide_number=None):
-    """
-    CSS equivalent:
-      display:flex; flex-direction:column; align-items:center; gap:96px;
-      padding:96px; background:#EFE7DA
-    Top section: subtitle + title + body
-    Bottom section: 3-photo strip (or placeholders)
-    """
-    img = gradient_bg()
+# ─── SLIDE TYPE 2: TEXT SLIDE (light bg, left-aligned) ───────────────────────
+# Layout: number top-left | subtitle | title (large) | body | brand bottom-left
+#
+def create_text_slide(title: str, body: str = "", subtitle: str = "",
+                       slide_number: int | None = None) -> Image.Image:
+    img = make_bg()
     draw = ImageDraw.Draw(img)
 
-    # photo strip height
-    PHOTO_H   = 340
-    PHOTO_TOP = H - PAD - PHOTO_H
-    TEXT_AREA_H = PHOTO_TOP - PAD - PAD  # available for text
-    TEXT_MAX_W  = W - PAD*2
+    MAX_W   = W - PAD * 2
+    # sizes: try 80→64→52→40
+    title_f, title_lines, title_sz = choose_font_size(
+        draw, title.upper(), [80, 64, 52, 40], MAX_W, "cactus")
 
-    # ── TOP: slide number ──
-    if slide_number:
-        n_fnt = font("regular", 16)
-        draw.text((PAD, PAD), f"0{slide_number}", font=n_fnt, fill=ACCENT)
+    TITLE_LH    = int(title_sz * 1.25)
+    TITLE_TRACK = 0.8
+    BODY_SIZE   = 36
+    SUB_SIZE    = 24
+    NUM_SIZE    = 20
+    BRAND_SIZE  = 22
+    BRAND_TRACK = 2.4
 
-    # ── Text block: subtitle + accent + title + body ──
-    sub_fnt  = font("regular", 18)
-    spaced_sub = "  ".join(subtitle.upper()) if subtitle else ""
-    sub_bb = draw.textbbox((0,0), spaced_sub, font=sub_fnt) if subtitle else (0,0,0,0)
-    sub_h_val = (sub_bb[3]-sub_bb[1] + 10 + 24) if subtitle else 0
+    y = PAD
 
-    title_fnt, title_lines = choose_size(title, (64,52,44,36), TEXT_MAX_W, draw)
-    title_h_val = text_h(draw, title_lines, title_fnt, gap=8)
+    # slide number — top left
+    if slide_number is not None:
+        n_f = fnt("sans", NUM_SIZE)
+        draw.text((PAD, y), f"0{slide_number}", font=n_f, fill=ACCENT_LINE)
 
-    body_fnt  = font("regular", 30)
-    body_lines = wrap(body, body_fnt, TEXT_MAX_W-60, draw)[:3] if body else []
-    body_h_val = (text_h(draw, body_lines, body_fnt, gap=8) + 24) if body_lines else 0
-
-    block_total = sub_h_val + title_h_val + 20 + body_h_val
-    text_top = PAD + max(0, (TEXT_AREA_H - block_total) // 2) + 30
-
-    y = text_top
+    # subtitle — top center, spaced caps
     if subtitle:
-        x = (W - (sub_bb[2]-sub_bb[0])) // 2
-        draw.text((x, y), spaced_sub, font=sub_fnt, fill=SUB)
-        y += (sub_bb[3]-sub_bb[1]) + 10
-        accent_line(draw, y, width=80)
-        y += 24
+        sub_f = fnt("sans", SUB_SIZE)
+        sub_up = subtitle.upper()
+        draw_tracked(draw, sub_up, PAD, y + 4, sub_f, TEXT_SUB,
+                     tracking_px=2.0, align="center")
 
-    y = draw_lines(draw, title_lines, y, title_fnt, TEXT, gap=8)
-    y += 20
+    y += 72   # drop after top row
 
-    if body_lines:
-        accent_line(draw, y, width=50)
-        y += 24
-        draw_lines(draw, body_lines, y, body_fnt, TEXT, gap=8)
+    # thin rule
+    draw.line([(PAD, y), (W - PAD, y)], fill=ACCENT_LINE, width=1)
+    y += 40
 
-    # ── BOTTOM: photo strip (3 columns) ──
-    GAP    = 12
-    COL_W  = (W - PAD*2 - GAP*2) // 3
+    # title block
+    y = draw_multiline_tracked(draw, title_lines, y, title_f, TEXT_DARK,
+                                TITLE_LH, TITLE_TRACK, "left")
+    y += 40
 
+    # body text
+    if body:
+        body_f = fnt("sans", BODY_SIZE)
+        body_lines = wrap_to_lines(draw, body, body_f, MAX_W)[:5]
+        for line in body_lines:
+            draw.text((PAD, y), line, font=body_f, fill=TEXT_SUB)
+            y += int(BODY_SIZE * 1.55)
+
+    # brand — bottom left
+    brand_f = fnt("sans", BRAND_SIZE)
+    brand_y = H - PAD - _text_h(draw, BRAND, brand_f)
+    draw_tracked(draw, BRAND, PAD, brand_y, brand_f, ACCENT_LINE,
+                 BRAND_TRACK, "left")
+
+    return img
+
+# ─── SLIDE TYPE 3: TEXT + PHOTO STRIP ────────────────────────────────────────
+# Layout: text top half | 3-column photo strip bottom half
+#
+def create_photo_slide(title: str, body: str = "", subtitle: str = "",
+                        photo_urls: list | None = None,
+                        slide_number: int | None = None) -> Image.Image:
+    img = make_bg()
+    draw = ImageDraw.Draw(img)
+
+    PHOTO_H  = 360
+    PHOTO_Y  = H - PAD - PHOTO_H
+    MAX_W    = W - PAD * 2
+    GAP_COL  = 12
+    COL_W    = (MAX_W - GAP_COL * 2) // 3
+
+    title_f, title_lines, title_sz = choose_font_size(
+        draw, title.upper(), [64, 52, 44, 36], MAX_W, "cactus")
+    TITLE_LH = int(title_sz * 1.25)
+
+    y = PAD
+    if slide_number is not None:
+        draw.text((PAD, y), f"0{slide_number}",
+                  font=fnt("sans", 20), fill=ACCENT_LINE)
+
+    if subtitle:
+        draw_tracked(draw, subtitle.upper(), PAD, y + 4,
+                     fnt("sans", 22), TEXT_SUB, 2.0, "center")
+    y += 64
+
+    draw.line([(PAD, y), (W - PAD, y)], fill=ACCENT_LINE, width=1)
+    y += 36
+
+    y = draw_multiline_tracked(draw, title_lines, y, title_f, TEXT_DARK,
+                                TITLE_LH, 0.8, "left")
+    y += 28
+
+    if body:
+        body_f = fnt("sans", 32)
+        for line in wrap_to_lines(draw, body, body_f, MAX_W)[:3]:
+            draw.text((PAD, y), line, font=body_f, fill=TEXT_SUB)
+            y += 48
+
+    # thin rule above photos
+    draw.line([(PAD, PHOTO_Y - 16), (W - PAD, PHOTO_Y - 16)],
+              fill=ACCENT_LINE, width=1)
+
+    # photo strip
     for i in range(3):
-        x_start = PAD + i*(COL_W + GAP)
+        x0 = PAD + i * (COL_W + GAP_COL)
         photo = None
         if photo_urls and i < len(photo_urls) and photo_urls[i]:
             photo = fetch_img(photo_urls[i])
-
         if photo:
-            # Crop to column ratio
-            ph_r = photo.width / photo.height
+            ph, pw = photo.height, photo.width
             col_r = COL_W / PHOTO_H
-            if ph_r > col_r:
-                nw = int(photo.height * col_r)
-                photo = photo.crop(((photo.width-nw)//2, 0, (photo.width+nw)//2, photo.height))
+            if pw / ph > col_r:
+                nw = int(ph * col_r)
+                photo = photo.crop(((pw - nw) // 2, 0, (pw + nw) // 2, ph))
             else:
-                nh = int(photo.width / col_r)
-                photo = photo.crop((0, (photo.height-nh)//2, photo.width, (photo.height+nh)//2))
+                nh = int(pw / col_r)
+                photo = photo.crop((0, (ph - nh) // 2, pw, (ph + nh) // 2))
             photo = photo.resize((COL_W, PHOTO_H), Image.LANCZOS)
-            img.paste(photo, (x_start, PHOTO_TOP))
+            img.paste(photo, (x0, PHOTO_Y))
         else:
-            # Warm placeholder
+            # warm placeholder
             for py in range(PHOTO_H):
-                f = py/PHOTO_H
-                r = int(225-f*12); g=int(218-f*12); b=int(208-f*12)
-                draw.line([(x_start, PHOTO_TOP+py),(x_start+COL_W, PHOTO_TOP+py)], fill=(r,g,b))
+                t = py / PHOTO_H
+                r = int(228 - t * 15); g = int(220 - t * 15); b = int(210 - t * 15)
+                draw.line([(x0, PHOTO_Y + py), (x0 + COL_W, PHOTO_Y + py)],
+                          fill=(r, g, b))
 
-    # Thin line above photos
-    accent_line(draw, PHOTO_TOP-2, width=W-PAD*2)
-
-    # Brand
-    brand_logo(draw, color=ACCENT)
+    # brand bottom-right
+    brand_f = fnt("sans", 20)
+    bw = sum(_text_w(draw, c, brand_f) for c in BRAND) + 2.4 * (len(BRAND) - 1)
+    brand_y = H - PAD - _text_h(draw, BRAND, brand_f)
+    draw_tracked(draw, BRAND, W - PAD - bw, brand_y, brand_f, ACCENT_LINE, 2.4, "right")
 
     return img
 
-# ─── FINAL / CTA SLIDE ───────────────────────────────────────────────────────────
-def create_final_slide(title, body="", photo_urls=None):
-    """
-    CSS: justify-content:space-between, padding:96px, background:#EFE7DA
-    Top: brand name large
-    Center: title + body
-    Bottom: 3 photos (if provided) or just text + brand
-    """
-    img = gradient_bg()
+# ─── SLIDE TYPE 4: FINAL / CTA ───────────────────────────────────────────────
+# Layout: brand top-center | large CTA title center | body | brand bottom
+#
+def create_final_slide(title: str, body: str = "",
+                        photo_urls: list | None = None) -> Image.Image:
+    img = make_bg()
     draw = ImageDraw.Draw(img)
 
-    PHOTO_H   = 310
-    PHOTO_TOP = H - PAD - PHOTO_H
-    has_photos = bool(photo_urls and any(photo_urls))
+    PHOTO_H   = 320
+    PHOTO_Y   = H - PAD - PHOTO_H
+    MAX_W     = W - PAD * 2
+    has_photo = bool(photo_urls and any(photo_urls))
 
-    # ── TOP: brand prominent ──
-    brand_fnt = font("regular", 24)
-    spaced_brand = "  ".join(BRAND)
-    bb = draw.textbbox((0,0), spaced_brand, font=brand_fnt)
-    x = (W - (bb[2]-bb[0])) // 2
-    draw.text((x, PAD), spaced_brand, font=brand_fnt, fill=ACCENT)
-    accent_line(draw, PAD + (bb[3]-bb[1]) + 16, width=140)
+    # brand top — large, center
+    brand_top_f = fnt("sans", 28)
+    draw_tracked(draw, BRAND, PAD, PAD, brand_top_f, TEXT_SUB, 3.0, "center")
+    top_brand_h = _text_h(draw, BRAND, brand_top_f)
 
-    # ── CENTER: title + body ──
-    TEXT_MAX_W = W - PAD*2
-    center_bottom = PHOTO_TOP - PAD if has_photos else H - PAD*3
-    center_top    = PAD + (bb[3]-bb[1]) + 60
-    center_h      = center_bottom - center_top
+    # thin rule
+    rule_y = PAD + top_brand_h + 20
+    draw.line([(PAD, rule_y), (W - PAD, rule_y)], fill=ACCENT_LINE, width=1)
 
-    title_fnt, title_lines = choose_size(title, (72,60,48,40), TEXT_MAX_W, draw)
-    title_h_val = text_h(draw, title_lines, title_fnt, gap=8)
+    # title
+    bottom_limit = PHOTO_Y - PAD if has_photo else H - PAD * 3
+    title_f, title_lines, title_sz = choose_font_size(
+        draw, title.upper(), [80, 64, 52, 40], MAX_W, "cactus")
+    TITLE_LH = int(title_sz * 1.25)
 
-    body_fnt   = font("italic", 30)
-    body_lines = wrap(body, body_fnt, TEXT_MAX_W-80, draw)[:4] if body else []
-    body_h_val = (text_h(draw, body_lines, body_fnt, gap=10) + 30) if body_lines else 0
+    body_f = fnt("sans", 34)
+    body_lines = wrap_to_lines(draw, body, body_f, MAX_W - 60)[:4] if body else []
+    body_h = len(body_lines) * 52 + 40 if body_lines else 0
 
-    block_h = title_h_val + body_h_val
-    text_y  = center_top + max(0, (center_h - block_h)//2)
+    total_text_h = len(title_lines) * TITLE_LH + body_h
+    center_range = bottom_limit - (rule_y + 40)
+    y = rule_y + 40 + max(0, (center_range - total_text_h) // 2)
 
-    y = draw_lines(draw, title_lines, text_y, title_fnt, TEXT, gap=8)
+    y = draw_multiline_tracked(draw, title_lines, y, title_f, TEXT_DARK,
+                                TITLE_LH, 0.8, "center")
+
     if body_lines:
-        y += 30
-        accent_line(draw, y, width=50)
+        y += 40
+        draw.line([(PAD, y), (W - PAD, y)], fill=ACCENT_LINE, width=1)
         y += 28
-        draw_lines(draw, body_lines, y, body_fnt, SUB, gap=10)
+        for line in body_lines:
+            draw_tracked(draw, line, PAD, y, body_f, TEXT_SUB, 0, "center")
+            y += 52
 
-    # ── BOTTOM: 3 photos or just brand ──
-    if has_photos:
-        GAP   = 12
-        COL_W = (W - PAD*2 - GAP*2) // 3
+    # photos
+    if has_photo:
+        GAP_COL = 12
+        COL_W = (MAX_W - GAP_COL * 2) // 3
         for i in range(3):
-            x_start = PAD + i*(COL_W + GAP)
-            photo = None
-            if photo_urls and i < len(photo_urls) and photo_urls[i]:
-                photo = fetch_img(photo_urls[i])
+            x0 = PAD + i * (COL_W + GAP_COL)
+            photo = fetch_img(photo_urls[i]) if photo_urls and i < len(photo_urls) and photo_urls[i] else None
             if photo:
-                ph_r = photo.width/photo.height
-                col_r = COL_W/PHOTO_H
-                if ph_r > col_r:
-                    nw = int(photo.height*col_r)
-                    photo = photo.crop(((photo.width-nw)//2,0,(photo.width+nw)//2,photo.height))
+                ph, pw = photo.height, photo.width
+                col_r = COL_W / PHOTO_H
+                if pw / ph > col_r:
+                    nw = int(ph * col_r)
+                    photo = photo.crop(((pw - nw) // 2, 0, (pw + nw) // 2, ph))
                 else:
-                    nh = int(photo.width/col_r)
-                    photo = photo.crop((0,(photo.height-nh)//2,photo.width,(photo.height+nh)//2))
+                    nh = int(pw / col_r)
+                    photo = photo.crop((0, (ph - nh) // 2, pw, (ph + nh) // 2))
                 photo = photo.resize((COL_W, PHOTO_H), Image.LANCZOS)
-                img.paste(photo, (x_start, PHOTO_TOP))
-            else:
-                for py in range(PHOTO_H):
-                    f=py/PHOTO_H; r=int(222-f*10); g=int(215-f*10); b=int(204-f*10)
-                    draw.line([(x_start,PHOTO_TOP+py),(x_start+COL_W,PHOTO_TOP+py)], fill=(r,g,b))
-        brand_logo(draw, color=ACCENT)
-    else:
-        brand_logo(draw, color=ACCENT)
+                img.paste(photo, (x0, PHOTO_Y))
+
+    # brand bottom
+    brand_bot_f = fnt("sans", 20)
+    brand_y = H - PAD - _text_h(draw, BRAND, brand_bot_f)
+    draw_tracked(draw, BRAND, PAD, brand_y, brand_bot_f, ACCENT_LINE, 2.4, "center")
 
     return img
 
-# ─── CAROUSEL GENERATOR ──────────────────────────────────────────────────────────
-def generate_carousel(slides_data):
+# ─── CAROUSEL BUILDER ────────────────────────────────────────────────────────
+
+def build_carousel(slides_data: list) -> list[dict]:
     results = []
     for i, s in enumerate(slides_data):
-        stype  = s.get("type", "text_1")
-        title  = s.get("title", "")
-        body   = s.get("body", "")
-        sub    = s.get("subtitle", "")
-        snum   = s.get("slide_number", i+1)
-        i_url  = s.get("image_url")
-        i_data = s.get("image")
-        photos = s.get("photo_urls")  # list of 3 URLs for strip
+        stype   = s.get("type", "text")
+        title   = s.get("title", "")
+        body    = s.get("body", "")
+        sub     = s.get("subtitle", "")
+        num     = s.get("slide_number", i + 1)
+        i_url   = s.get("image_url")
+        i_data  = s.get("image")
+        photos  = s.get("photo_urls")
 
-        if stype == "cover":
-            img = create_cover(title, sub, i_url, i_data)
-        elif stype == "text_2":
-            img = create_text_slide_2(title, body, sub, photos, snum)
-        elif stype == "final":
-            img = create_final_slide(title, body, photos)
-        else:  # "text_1" (default)
-            img = create_text_slide_1(title, sub, snum)
+        if   stype == "cover":  img = create_cover(title, i_url, i_data)
+        elif stype == "photo":  img = create_photo_slide(title, body, sub, photos, num)
+        elif stype == "final":  img = create_final_slide(title, body, photos)
+        else:                   img = create_text_slide(title, body, sub, num)
 
         buf = BytesIO()
-        img.save(buf, format="JPEG", quality=92, optimize=True)
-        b64 = base64.b64encode(buf.getvalue()).decode()
+        img.save(buf, format="JPEG", quality=93, optimize=True)
         results.append({
-            "slide_number": snum,
+            "slide_number": num,
             "type": stype,
-            "image_base64": b64,
-            "format": "jpeg"
+            "image_base64": base64.b64encode(buf.getvalue()).decode(),
+            "format": "jpeg",
         })
     return results
 
-# ─── IN-MEMORY IMAGE STORE ───────────────────────────────────────────────────────
-_store = {}
+# ─── IN-MEMORY STORE (30 min TTL) ────────────────────────────────────────────
+_store: dict = {}
 
-def cleanup():
+def _cleanup():
     cut = time.time() - 1800
-    for k in [k for k,v in _store.items() if v.get("t",0)<cut]:
+    for k in [k for k, v in _store.items() if v.get("t", 0) < cut]:
         del _store[k]
 
-# ─── FLASK APP ───────────────────────────────────────────────────────────────────
+# ─── FLASK APP ───────────────────────────────────────────────────────────────
 def create_app():
     try:
         from flask import Flask, request, jsonify, Response
-        app = Flask(__name__)
-
-        @app.route("/health")
-        def health(): return jsonify({"status":"ok","canvas":"1080x1440"})
-
-        @app.route("/slides/<sid>/<int:n>.png")
-        def serve(sid, n):
-            sess = _store.get(sid)
-            if not sess: return "Not found", 404
-            data = sess.get(n)
-            if not data: return "Slide not found", 404
-            return Response(data, mimetype="image/jpeg",
-                            headers={"Cache-Control":"no-cache"})
-
-        @app.route("/generate-from-text", methods=["POST"])
-        def gen():
-            """
-            Input JSON:
-            {
-              "topic": "...",
-              "subtitle": "Здоровье кожи",
-              "slides": [{"title":"...","body":"..."},...],
-              "cover_image_url": "https://..."    ← DALL-E image URL
-            }
-            Returns:
-            { "urls":["..."], "count":N, "session_id":"...", "slides":[...] }
-            """
-            try:
-                cleanup()
-                d = request.get_json()
-                topic     = d.get("topic","Атопический дерматит")
-                subtitle  = d.get("subtitle","Здоровье кожи")
-                gpt_slides= d.get("slides", [])
-                cover_url = d.get("cover_image_url")
-
-                slides = []
-                # Slide 1: Cover
-                slides.append({
-                    "type":"cover",
-                    "title": topic,
-                    "subtitle": subtitle,
-                    "slide_number": 1,
-                    "image_url": cover_url
-                })
-                total = len(gpt_slides)
-                for j, s in enumerate(gpt_slides, 1):
-                    if j == total:            # last → final/CTA
-                        slides.append({
-                            "type":"final",
-                            "title": s.get("title",""),
-                            "body":  s.get("body",""),
-                            "slide_number": j+1
-                        })
-                    elif j % 3 == 0 and total >= 4:   # every 3rd → with photos (placeholders)
-                        slides.append({
-                            "type":"text_2",
-                            "title": s.get("title",""),
-                            "body":  s.get("body",""),
-                            "subtitle": subtitle,
-                            "slide_number": j+1
-                        })
-                    else:
-                        slides.append({
-                            "type":"text_1",
-                            "title": s.get("title",""),
-                            "subtitle": subtitle,
-                            "slide_number": j+1
-                        })
-
-                sid     = str(uuid.uuid4())
-                results = generate_carousel(slides)
-                _store[sid] = {"t": time.time()}
-
-                base = request.host_url.rstrip("/")
-                urls = []
-                for r in results:
-                    raw = base64.b64decode(r.pop("image_base64"))
-                    _store[sid][r["slide_number"]] = raw
-                    url = f"{base}/slides/{sid}/{r['slide_number']}.png"
-                    r["url"] = url
-                    urls.append(url)
-
-                return jsonify({"urls":urls,"count":len(results),
-                                "session_id":sid,"slides":results})
-            except Exception as e:
-                import traceback
-                return jsonify({"error":str(e),"trace":traceback.format_exc()}), 500
-
-        return app
     except ImportError:
         return None
+
+    app = Flask(__name__)
+
+    @app.route("/health")
+    def health():
+        return jsonify({"status": "ok", "canvas": f"{W}x{H}", "version": "3"})
+
+    @app.route("/slides/<sid>/<int:n>.jpg")
+    def serve(sid, n):
+        sess = _store.get(sid)
+        if not sess: return "Not found", 404
+        data = sess.get(n)
+        if not data: return "Slide not found", 404
+        return Response(data, mimetype="image/jpeg",
+                        headers={"Cache-Control": "no-cache"})
+
+    # backward compat
+    @app.route("/slides/<sid>/<int:n>.png")
+    def serve_png(sid, n):
+        return serve(sid, n)
+
+    @app.route("/generate-from-text", methods=["POST"])
+    def gen():
+        """
+        POST body:
+        {
+          "topic":          "...",
+          "subtitle":       "Здоровье кожи",          // optional
+          "slides":         [{"title":"...","body":"..."},...],
+          "cover_image_url":"https://...",             // DALL-E URL
+          "photo_urls":     ["url1","url2","url3"]     // Cloudinary avatars
+        }
+        """
+        try:
+            _cleanup()
+            d          = request.get_json(force=True)
+            topic      = d.get("topic", "Атопический дерматит")
+            subtitle   = d.get("subtitle", "Здоровье кожи")
+            gpt_slides = d.get("slides", [])
+            cover_url  = d.get("cover_image_url")
+            photo_urls = d.get("photo_urls") or []
+
+            slides = []
+
+            # Slide 1 — Cover
+            slides.append({
+                "type":      "cover",
+                "title":     topic,
+                "slide_number": 1,
+                "image_url": cover_url,
+            })
+
+            total = len(gpt_slides)
+            for j, s in enumerate(gpt_slides, 1):
+                if j == total:
+                    # last slide → CTA
+                    slides.append({
+                        "type":  "final",
+                        "title": s.get("title", ""),
+                        "body":  s.get("body", ""),
+                        "slide_number": j + 1,
+                        "photo_urls": photo_urls[:3] if photo_urls else None,
+                    })
+                elif j % 3 == 0 and total >= 4:
+                    # every 3rd → photo strip
+                    slides.append({
+                        "type":      "photo",
+                        "title":     s.get("title", ""),
+                        "body":      s.get("body", ""),
+                        "subtitle":  subtitle,
+                        "slide_number": j + 1,
+                        "photo_urls": photo_urls[:3] if photo_urls else None,
+                    })
+                else:
+                    slides.append({
+                        "type":      "text",
+                        "title":     s.get("title", ""),
+                        "body":      s.get("body", ""),
+                        "subtitle":  subtitle,
+                        "slide_number": j + 1,
+                    })
+
+            sid     = str(uuid.uuid4())
+            results = build_carousel(slides)
+            _store[sid] = {"t": time.time()}
+
+            base = request.host_url.rstrip("/")
+            urls = []
+            for r in results:
+                raw = base64.b64decode(r.pop("image_base64"))
+                _store[sid][r["slide_number"]] = raw
+                r["url"] = f"{base}/slides/{sid}/{r['slide_number']}.jpg"
+                urls.append(r["url"])
+
+            return jsonify({
+                "urls":       urls,
+                "count":      len(results),
+                "session_id": sid,
+                "slides":     results,
+            })
+
+        except Exception as e:
+            import traceback
+            return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+    return app
+
 
 app = create_app()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "server":
-        port = int(os.environ.get("PORT",5000))
+        port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port)
