@@ -557,6 +557,7 @@ def create_app():
             subtitle   = d.get("subtitle", "Здоровье кожи")
             gpt_slides = d.get("slides", [])
             cover_url  = d.get("cover_image_url")
+            cover_data = d.get("cover_image_data")   # base64 from gpt-image-1
             photo_urls = d.get("photo_urls") or []
 
             slides = []
@@ -567,6 +568,7 @@ def create_app():
                 "title":     topic,
                 "slide_number": 1,
                 "image_url": cover_url,
+                "image":     cover_data,   # b64 fallback if no URL
             })
 
             total = len(gpt_slides)
